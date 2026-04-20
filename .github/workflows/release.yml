@@ -1,0 +1,226 @@
+name: Release valkey-fractalsql Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # Linux: build fractalsql.so per arch. The Valkey Modules ABI
+  # (REDISMODULE_APIVER_1 / VALKEYMODULE_APIVER_1) was preserved
+  # across the April 2024 fork from Redis, so one .so per arch covers
+  # every currently-shipping Valkey major — 7.2 / 8.0 / 8.1.
+  #
+  # amd64 gets a native smoke test that loads the SAME .so into
+  # valkey/valkey:7.2, :8.0, and :8.1 containers and verifies
+  # FRACTALSQL.EDITION / FRACTALSQL.VERSION plus a cosine-similarity
+  # convergence check — one binary, every major, which is the actual
+  # cross-major-ABI proof.
+  #
+  # arm64 skips the smoke test — QEMU + valkey-server works but adds
+  # flake; the Dockerfile's post-link assertions already validate the
+  # arm64 ABI (ldd shortlist, .dynsym entry point, size ceiling).
+  # ------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build fractalsql.so for ${{ matrix.arch }}
+        run: |
+          chmod +x build.sh
+          ./build.sh ${{ matrix.arch }}
+          ls -l dist/${{ matrix.arch }}/fractalsql.so
+
+      - name: Smoke test (edition/version + FRACTAL.SEARCH convergence)
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          SO="$(pwd)/dist/amd64/fractalsql.so"
+
+          # Validate the same fractalsql.so against every supported
+          # Valkey major — 7.2 / 8.0 / 8.1. One binary in, three
+          # containers out, which proves the cross-major ABI claim
+          # rather than just asserting it in commentary.
+          #
+          # Each cell runs the container with -p, so the host can
+          # drive it via both docker exec (simple string commands)
+          # and a Python RESP client (for the binary-blob corpus /
+          # query and the nested map reply from FRACTAL.SEARCH).
+          for TAG in 7.2 8.0 8.1; do
+              C="valkey-${TAG}"
+              HOST_PORT=$((46379 + $(echo "${TAG}" | tr -d .)))
+              echo "=============================================="
+              echo "  Smoke test against valkey/valkey:${TAG} (host port ${HOST_PORT})"
+              echo "=============================================="
+
+              docker run -d --name "${C}" \
+                  -v "${SO}:/modules/fractalsql.so:ro" \
+                  -p "${HOST_PORT}:6379" \
+                  "valkey/valkey:${TAG}" \
+                  valkey-server --loadmodule /modules/fractalsql.so
+
+              # valkey/valkey:X images start accepting on :6379
+              # immediately — no password, no two-phase bootstrap.
+              # A simple PING loop is enough to prove readiness.
+              for i in $(seq 1 30); do
+                  if docker exec "${C}" valkey-cli PING 2>/dev/null \
+                       | grep -q PONG; then
+                      break
+                  fi
+                  sleep 1
+              done
+              docker exec "${C}" valkey-cli PING | grep -q PONG
+
+              docker exec "${C}" valkey-cli MODULE LIST | tee /tmp/mods
+              grep -q fractalsql /tmp/mods
+
+              EDITION=$(docker exec "${C}" valkey-cli FRACTALSQL.EDITION)
+              echo "[${TAG}] edition: ${EDITION}"
+              test "${EDITION}" = "Community"
+
+              VERSION=$(docker exec "${C}" valkey-cli FRACTALSQL.VERSION)
+              echo "[${TAG}] version: ${VERSION}"
+              test "${VERSION}" = "1.0.0"
+
+              # Convergence check. query = (0.6, 0.8). Cosine distance
+              # is magnitude-invariant — every point on the ray through
+              # the origin and (0.6, 0.8) is a global optimum, so the
+              # coordinates SFS returns can land anywhere on that ray
+              # in [-1, 1]^2. We assert the invariant the optimizer is
+              # actually minimizing: cosine similarity to the query
+              # should be essentially 1. ||query||^2 = 0.6^2+0.8^2=1,
+              # so cos_sim simplifies to (v . query) / ||v||.
+              #
+              # Valkey's RESP3 map reply is hard to parse from bash,
+              # so drive the container from the host with a tiny
+              # Python RESP client over the mapped port. Python
+              # stdlib only — the runner has python3, and a raw
+              # socket is simpler to audit than pip-installing a
+              # client library.
+              python3 scripts/ci/smoke_convergence.py "${HOST_PORT}" "${TAG}"
+
+              docker rm -f "${C}"
+          done
+          echo "smoke test passed on valkey 7.2 / 8.0 / 8.1"
+
+      - name: Upload .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-fractalsql-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}/fractalsql.so
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # One packaging cell per arch. Pulls the per-arch .so from the
+  # build job, runs scripts/package.sh to produce .deb + .rpm, and
+  # verifies no luajit runtime dep leaked into the package metadata.
+  # ------------------------------------------------------------------
+  package:
+    name: package ${{ matrix.arch }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download fractalsql.so
+        uses: actions/download-artifact@v4
+        with:
+          name: valkey-fractalsql-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          sudo gem install --no-document fpm
+
+      - name: Build .deb and .rpm for ${{ matrix.arch }}
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh ${{ matrix.arch }}
+          ls -l dist/packages
+
+      - name: Verify packages declare no luajit dependency
+        run: |
+          set -euo pipefail
+          for deb in dist/packages/*-${{ matrix.arch }}.deb; do
+              echo "=== ${deb} ==="
+              DEPS=$(dpkg-deb -f "${deb}" Depends)
+              echo "Depends: ${DEPS}"
+              if echo "${DEPS}" | grep -iE 'luajit'; then
+                  echo "FAIL: ${deb} declares a luajit dependency" >&2
+                  exit 1
+              fi
+          done
+          for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
+              echo "=== ${rpm} ==="
+              REQS=$(rpm -qpR "${rpm}" || true)
+              echo "Requires:"
+              echo "${REQS}"
+              if echo "${REQS}" | grep -iE '^luajit'; then
+                  echo "FAIL: ${rpm} declares a luajit requirement" >&2
+                  exit 1
+              fi
+          done
+
+      - name: Verify packages ship LICENSE files
+        run: |
+          set -euo pipefail
+          for deb in dist/packages/*-${{ matrix.arch }}.deb; do
+              echo "=== ${deb} ==="
+              CONTENTS=$(dpkg-deb -c "${deb}")
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/valkey-fractalsql/LICENSE$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/valkey-fractalsql/LICENSE-THIRD-PARTY$'
+          done
+          for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
+              echo "=== ${rpm} ==="
+              CONTENTS=$(rpm -qlp "${rpm}")
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/valkey-fractalsql/LICENSE$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/valkey-fractalsql/LICENSE-THIRD-PARTY$'
+          done
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: valkey-fractalsql-${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/packages/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

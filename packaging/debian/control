@@ -1,0 +1,41 @@
+Source: valkey-fractalsql
+Section: database
+Priority: optional
+Maintainer: FractalSQLabs <ops@fractalsqlabs.io>
+Build-Depends:
+ debhelper-compat (= 13),
+ pkg-config,
+ curl,
+ git,
+ ca-certificates
+Standards-Version: 4.6.2
+Homepage: https://github.com/FractalSQLabs/valkey-fractalsql
+
+Package: valkey-fractalsql
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libc6 (>= 2.38),
+ valkey-server
+Description: Stochastic Fractal Search module for Valkey
+ valkey-fractalsql is a native C module for Valkey 7.2 / 8.0 / 8.1
+ that exposes a FRACTAL.SEARCH command backed by a LuaJIT-compiled
+ Stochastic Fractal Search optimizer. Built against Valkey's
+ self-contained redismodule.h — the module ABI (REDISMODULE_APIVER_1,
+ aliased as VALKEYMODULE_APIVER_1) was preserved across the April
+ 2024 fork from Redis, so one .so per arch covers every currently-
+ shipping Valkey major.
+ .
+ The command is flagged readonly / fast / allow-stale so the Valkey
+ 8.x scheduler can dispatch it to an I/O worker thread, bypassing the
+ main event loop for high throughput. LuaJIT is statically linked
+ into the module; the only runtime dependency is glibc.
+ .
+ After installation, enable the module by adding the following line
+ to valkey.conf (the post-install script prints this):
+ .
+     loadmodule /usr/lib/valkey/modules/fractalsql.so
+ .
+ An example config snippet is installed at
+ /etc/valkey/modules-available/fractalsql.conf.

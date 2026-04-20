@@ -1,0 +1,49 @@
+#!/bin/sh
+# packaging/debian/postinst
+#
+# Prints a usage hint right after `apt install` so operators know how
+# to enable the module.
+
+set -e
+
+case "$1" in
+    configure)
+        cat <<'EOF'
+
+valkey-fractalsql installed.
+
+The module is at:
+    /usr/lib/valkey/modules/fractalsql.so
+
+Enable it one of two ways:
+
+  1) Add this line to /etc/valkey/valkey.conf:
+
+         loadmodule /usr/lib/valkey/modules/fractalsql.so
+
+     Or include the shipped snippet:
+
+         include /etc/valkey/modules-available/fractalsql.conf
+
+     Then restart:
+
+         sudo systemctl restart valkey
+
+  2) Live-load it on a running server (does NOT persist across restarts):
+
+         valkey-cli MODULE LOAD /usr/lib/valkey/modules/fractalsql.so
+
+Verify:
+
+    valkey-cli MODULE LIST
+    valkey-cli FRACTALSQL.EDITION       # -> "Community"
+    valkey-cli FRACTALSQL.VERSION       # -> "1.0.0"
+    valkey-cli COMMAND INFO FRACTAL.SEARCH
+
+EOF
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+exit 0

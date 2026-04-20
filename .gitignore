@@ -1,0 +1,42 @@
+# Build artifacts
+*.so
+*.o
+*.a
+fractalsql.so
+
+# NOTE: include/sfs_core_bc.h is a tracked source file
+# (pre-compiled LuaJIT bytecode). Do not add it to this list.
+
+# redismodule.h / valkeymodule.h are fetched from upstream Valkey at
+# build time (see Makefile and docker/Dockerfile). Valkey's
+# redismodule.h is a shim that #includes valkeymodule.h, so both
+# files are needed for a successful compile. Not checked-in vendor
+# copies.
+include/redismodule.h
+include/valkeymodule.h
+
+# Build output trees
+dist/
+
+# Packaging temp files (fpm + debhelper + rpmbuild stagedirs)
+*.deb
+*.rpm
+packaging/debian/.debhelper/
+packaging/debian/valkey-fractalsql/
+packaging/debian/files
+packaging/debian/*.log
+packaging/debian/*.substvars
+packaging/rpm/BUILD/
+packaging/rpm/BUILDROOT/
+packaging/rpm/RPMS/
+packaging/rpm/SOURCES/
+packaging/rpm/SPECS/
+packaging/rpm/SRPMS/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
